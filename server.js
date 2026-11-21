@@ -122,6 +122,19 @@ app.patch('/api/users/update', async (req, res) => {
   }
 });
 
+app.patch('/api/users/push-token', async (req, res) => {
+  const { full_name, expo_push_token } = req.body;
+  try {
+    await pool.query(
+      'UPDATE users SET expo_push_token = $1 WHERE full_name = $2',
+      [expo_push_token, full_name]
+    );
+    res.json({ message: 'Push token saved' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/dashboard', async (req, res) => {
   try {
     const ordersRes = await pool.query(`
@@ -213,7 +226,33 @@ app.patch('/api/orders/:id/status', async (req, res) => {
       'UPDATE orders SET status = $1 WHERE order_id = $2 RETURNING *',
       [status, id]
     );
-    res.json(updated.rows[0]);
+    const order = updated.rows[0];
+
+    if (order) {
+      try {
+        const userRes = await pool.query(
+          'SELECT expo_push_token FROM users WHERE full_name = $1',
+          [order.customer_name]
+        );
+        const pushToken = userRes.rows[0]?.expo_push_token;
+        if (pushToken) {
+          await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              to: pushToken,
+              sound: 'default',
+              title: 'KSCync Laundry Update',
+              body: `Hi ${order.customer_name}! Your laundry status is now: ${status.toUpperCase()}.`
+            })
+          });
+        }
+      } catch (pushErr) {
+        console.log('Push notification skipped:', pushErr.message);
+      }
+    }
+
+    res.json(order);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
