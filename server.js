@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -6,35 +6,51 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Connect to PostgreSQL (Uses Render's DATABASE_URL for Neon in cloud, falls back to local DB)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:Kcoby_112805@localhost:5432/kscync_db',
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Container Splitting Logic: 8 kg max per basket; >= 9 kg splits into 2 baskets
+// Batch Splitting Logic: 0 = pending weighing; < 12 kg = 1 batch; 12–24 kg = 2 washing batches
 function validateAndSplitContainers(totalWeight, c1, c2) {
-  const weight = parseFloat(totalWeight);
-  if (weight <= 8.0) {
+  const weight = totalWeight === null || totalWeight === undefined || totalWeight === '' ? 0 : parseFloat(totalWeight);
+
+  if (isNaN(weight) || weight < 0) {
+    throw new Error('Weight must be a valid positive number.');
+  }
+
+  if (weight === 0 || weight < 12.0) {
     return [
-      { basket_number: 1, weight: weight, color: c1?.color || 'Green', material: c1?.material || 'Tote Bag', brand: c1?.brand || 'Unbranded' }
+      {
+        basket_number: 1,
+        weight: weight,
+        color: c1?.color || 'Green',
+        material: c1?.material || 'Tote Bag',
+        brand: c1?.brand || 'Unbranded'
+      }
     ];
-  } else if (weight >= 9.0 && weight <= 16.0) {
+  } else if (weight >= 12.0 && weight <= 24.0) {
+    const half = Number((weight / 2).toFixed(2));
     return [
-      { basket_number: 1, weight: 8.0, color: c1?.color || 'Green', material: c1?.material || 'Tote Bag', brand: c1?.brand || 'Unbranded' },
+      {
+        basket_number: 1,
+        weight: half,
+        color: c1?.color || 'Green',
+        material: c1?.material || 'Tote Bag',
+        brand: c1?.brand || 'Unbranded'
+      },
       {
         basket_number: 2,
-        weight: Number((weight - 8.0).toFixed(2)),
-        color: c2?.color || 'Blue',
+        weight: Number((weight - half).toFixed(2)),
+        color: c2?.color || c1?.color || 'Blue',
         material: c2?.material || 'Plastic Hamper',
         brand: c2?.brand || 'Generic'
       }
     ];
   }
-  throw new Error('Loads between 8.01 kg and 8.99 kg are invalid or loads > 16 kg must be logged as separate transactions.');
+  throw new Error('Loads above 24 kg must be logged as separate transactions.');
 }
 
-// POST: Register Endpoint (Now saves phone_number)
 app.post('/api/register', async (req, res) => {
   const { full_name, phone_number, email, password } = req.body;
   try {
@@ -42,49 +58,44 @@ app.post('/api/register', async (req, res) => {
       "INSERT INTO users (full_name, phone_number, email, password_hash, role) VALUES ($1, $2, $3, $4, 'customer') RETURNING *",
       [full_name, phone_number, email, password]
     );
-    res.status(201).json({ 
-      message: 'Registration successful', 
-      user: { 
-        id: newUser.rows[0].user_id, 
-        name: newUser.rows[0].full_name, 
+    res.status(201).json({
+      message: 'Registration successful',
+      user: {
+        id: newUser.rows[0].user_id,
+        name: newUser.rows[0].full_name,
         phone: newUser.rows[0].phone_number,
-        role: newUser.rows[0].role, 
-        email: newUser.rows[0].email 
-      } 
+        role: newUser.rows[0].role,
+        email: newUser.rows[0].email
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST: Login Endpoint with Role Verification (RBAC) (Now returns phone)
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
     const userRes = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (userRes.rows.length === 0) {
+    if (userRes.rows.length === 0 || userRes.rows[0].password_hash !== password) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     const user = userRes.rows[0];
-    if (user.password_hash !== password) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    res.json({ 
-      message: 'Login successful', 
-      user: { 
-        id: user.user_id, 
-        name: user.full_name, 
+    res.json({
+      message: 'Login successful',
+      user: {
+        id: user.user_id,
+        name: user.full_name,
         phone: user.phone_number,
-        role: user.role, 
-        email: user.email 
-      } 
+        role: user.role,
+        email: user.email
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// PATCH: Update User Profile (Username & Mobile Number)
 app.patch('/api/users/update', async (req, res) => {
   const { old_name, full_name, phone_number } = req.body;
   try {
@@ -92,19 +103,12 @@ app.patch('/api/users/update', async (req, res) => {
       'UPDATE users SET full_name = $1, phone_number = $2 WHERE full_name = $3 RETURNING *',
       [full_name, phone_number, old_name]
     );
-
     if (updatedUser.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-
-    // Keep existing orders linked to the updated username
     if (old_name !== full_name) {
-      await pool.query(
-        'UPDATE orders SET customer_name = $1 WHERE customer_name = $2',
-        [full_name, old_name]
-      );
+      await pool.query('UPDATE orders SET customer_name = $1 WHERE customer_name = $2', [full_name, old_name]);
     }
-
     res.json({
       message: 'Profile updated successfully',
       user: {
@@ -118,12 +122,12 @@ app.patch('/api/users/update', async (req, res) => {
   }
 });
 
-// GET: Fetch Live Shop Capacity, Orders, and Utility Overhead Rate
 app.get('/api/dashboard', async (req, res) => {
   try {
     const ordersRes = await pool.query(`
       SELECT o.*, 
-        COALESCE(json_agg(c.*) FILTER (WHERE c.container_id IS NOT NULL), '[]') AS containers
+        COALESCE(json_agg(c.*) FILTER (WHERE c.container_id IS NOT NULL), '[]') AS containers,
+        EXISTS(SELECT 1 FROM reviews r WHERE r.order_id = o.order_id) AS has_review
       FROM orders o
       LEFT JOIN containers c ON o.order_id = c.order_id
       GROUP BY o.order_id
@@ -134,11 +138,12 @@ app.get('/api/dashboard', async (req, res) => {
       SELECT COUNT(c.container_id) AS count
       FROM containers c
       JOIN orders o ON c.order_id = o.order_id
-      WHERE o.status NOT IN ('Completed')
+      WHERE o.status NOT IN ('Completed', 'Picked Up')
     `);
 
     const capRes = await pool.query('SELECT * FROM shop_capacity WHERE id = 1');
     const utilRes = await pool.query('SELECT * FROM utility_logs ORDER BY log_id DESC LIMIT 1');
+    const annRes = await pool.query('SELECT * FROM announcements WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 3');
 
     const activeCount = parseInt(activeBasketsRes.rows[0].count || 0);
     const maxBaskets = capRes.rows[0]?.max_active_baskets || 10;
@@ -151,6 +156,7 @@ app.get('/api/dashboard', async (req, res) => {
 
     res.json({
       orders: ordersRes.rows,
+      announcements: annRes.rows,
       capacity: { activeBaskets: activeCount, maxBaskets, status: capacityStatus, tight_threshold_percent: capRes.rows[0]?.tight_threshold_percent || 75 },
       utility: { ...util, totalUtilityCost, overheadPerKg }
     });
@@ -159,7 +165,6 @@ app.get('/api/dashboard', async (req, res) => {
   }
 });
 
-// PATCH: Update Shop Capacity Configuration
 app.patch('/api/capacity', async (req, res) => {
   const { max_active_baskets, tight_threshold_percent } = req.body;
   try {
@@ -173,16 +178,16 @@ app.patch('/api/capacity', async (req, res) => {
   }
 });
 
-// POST: Create New Order & Assign Physical Containers
 app.post('/api/orders', async (req, res) => {
   const { customer_name, booking_type, total_weight_kg, target_completion_time, container1, container2 } = req.body;
   try {
-    const splitBaskets = validateAndSplitContainers(total_weight_kg, container1, container2);
+    const safeWeight = total_weight_kg === null || total_weight_kg === undefined || total_weight_kg === '' ? 0 : parseFloat(total_weight_kg);
+    const splitBaskets = validateAndSplitContainers(safeWeight, container1, container2);
 
     const newOrder = await pool.query(
-      `INSERT INTO orders (customer_name, booking_type, total_weight_kg, target_completion_time, status)
-       VALUES ($1, $2, $3, $4, 'Received') RETURNING *`,
-      [customer_name, booking_type, total_weight_kg, target_completion_time || 'Same Day']
+      `INSERT INTO orders (customer_name, booking_type, total_weight_kg, target_completion_time, status, payment_status)
+       VALUES ($1, $2, $3, $4, 'Received', 'Unpaid') RETURNING *`,
+      [customer_name, booking_type, safeWeight, target_completion_time || 'Same Day, 4:00 PM - 6:00 PM']
     );
 
     const orderId = newOrder.rows[0].order_id;
@@ -200,7 +205,6 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-// PATCH: Advance Order Stage (Received -> Washing -> Drying -> Folding -> Ready -> Completed)
 app.patch('/api/orders/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
@@ -210,6 +214,33 @@ app.patch('/api/orders/:id/status', async (req, res) => {
       [status, id]
     );
     res.json(updated.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/orders/:id/payment', async (req, res) => {
+  const { id } = req.params;
+  const { payment_status } = req.body;
+  try {
+    const updated = await pool.query(
+      'UPDATE orders SET payment_status = $1 WHERE order_id = $2 RETURNING *',
+      [payment_status || 'Paid', id]
+    );
+    res.json(updated.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/reviews', async (req, res) => {
+  const { order_id, customer_name, rating, feedback } = req.body;
+  try {
+    const result = await pool.query(
+      'INSERT INTO reviews (order_id, customer_name, rating, feedback) VALUES ($1, $2, $3, $4) RETURNING *',
+      [order_id, customer_name, rating, feedback || '']
+    );
+    res.status(201).json({ message: 'Review submitted', review: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
