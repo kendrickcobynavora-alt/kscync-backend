@@ -269,7 +269,6 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-// Dedicated Weigh-In Route for "Weight Now" Modal Persistence
 app.patch('/api/orders/:id/weigh', async (req, res) => {
   const { id } = req.params;
   const { total_weight_kg, container_description, containers } = req.body;
@@ -287,8 +286,16 @@ app.patch('/api/orders/:id/weigh', async (req, res) => {
       await pool.query('DELETE FROM containers WHERE order_id = $1', [parseInt(id, 10)]);
       for (const b of containers) {
         await pool.query(
-          'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, $2, $3, $4)',
-          [parseInt(id, 10), b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
+          `INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color, material, brand) 
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            parseInt(id, 10), 
+            b.basket_number || 1, 
+            b.assigned_weight_kg || total_weight_kg || 0, 
+            b.color || container_description || 'Standard Bag',
+            b.material || 'Tote Bag',
+            b.brand || 'Unbranded'
+          ]
         );
       }
     } else {
@@ -300,8 +307,9 @@ app.patch('/api/orders/:id/weigh', async (req, res) => {
         );
       } else {
         await pool.query(
-          'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, 1, $2, $3)',
-          [parseInt(id, 10), parseFloat(total_weight_kg), container_description || 'Standard Bag']
+          `INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color, material, brand) 
+           VALUES ($1, 1, $2, $3, $4, $5)`,
+          [parseInt(id, 10), parseFloat(total_weight_kg), container_description || 'Standard Bag', 'Tote Bag', 'Unbranded']
         );
       }
     }
@@ -338,8 +346,8 @@ app.patch('/api/orders/:id/status', async (req, res) => {
       await pool.query('DELETE FROM containers WHERE order_id = $1', [parseInt(id, 10)]);
       for (const b of containers) {
         await pool.query(
-          'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, $2, $3, $4)',
-          [parseInt(id, 10), b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
+          'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color, material, brand) VALUES ($1, $2, $3, $4, $5, $6)',
+          [parseInt(id, 10), b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag', 'Tote Bag', 'Unbranded']
         );
       }
     }
