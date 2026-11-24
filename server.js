@@ -1,4 +1,4 @@
- const express = require('express');
+const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -269,6 +269,7 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
+// Dedicated Weigh-In Route for "Weight Now" Modal Persistence
 app.patch('/api/orders/:id/weigh', async (req, res) => {
   const { id } = req.params;
   const { total_weight_kg, container_description, containers } = req.body;
