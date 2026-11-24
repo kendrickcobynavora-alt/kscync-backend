@@ -1,4 +1,4 @@
- const express = require('express');
+const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -73,6 +73,30 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// Alias login route for Admin Hub auth check
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const userRes = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (userRes.rows.length === 0 || userRes.rows[0].password_hash !== password) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    const user = userRes.rows[0];
+    res.json({
+      message: 'Login successful',
+      user: {
+        id: user.user_id,
+        name: user.full_name,
+        phone: user.phone_number,
+        role: user.role,
+        email: user.email
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -135,6 +159,7 @@ app.patch('/api/users/push-token', async (req, res) => {
   }
 });
 
+// Enhanced Dashboard Route returning Orders, Reviews, Users, Announcements, and Capacities
 app.get('/api/dashboard', async (req, res) => {
   try {
     const ordersRes = await pool.query(`
@@ -154,9 +179,11 @@ app.get('/api/dashboard', async (req, res) => {
       WHERE o.status NOT IN ('Completed', 'Picked Up')
     `);
 
+    const reviewsRes = await pool.query('SELECT * FROM reviews ORDER BY created_at DESC LIMIT 20');
+    const usersRes = await pool.query('SELECT user_id, full_name, phone_number, role, email, expo_push_token FROM users');
     const capRes = await pool.query('SELECT * FROM shop_capacity WHERE id = 1');
     const utilRes = await pool.query('SELECT * FROM utility_logs ORDER BY log_id DESC LIMIT 1');
-    const annRes = await pool.query('SELECT * FROM announcements WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 3');
+    const annRes = await pool.query('SELECT * FROM announcements WHERE is_active = TRUE ORDER BY created_at DESC');
 
     const activeCount = parseInt(activeBasketsRes.rows[0].count || 0);
     const maxBaskets = capRes.rows[0]?.max_active_baskets || 10;
@@ -169,6 +196,8 @@ app.get('/api/dashboard', async (req, res) => {
 
     res.json({
       orders: ordersRes.rows,
+      reviews: reviewsRes.rows,
+      users: usersRes.rows,
       announcements: annRes.rows,
       capacity: { activeBaskets: activeCount, maxBaskets, status: capacityStatus, tight_threshold_percent: capRes.rows[0]?.tight_threshold_percent || 75 },
       utility: { ...util, totalUtilityCost, overheadPerKg }
@@ -200,7 +229,7 @@ app.post('/api/orders', async (req, res) => {
     const newOrder = await pool.query(
       `INSERT INTO orders (customer_name, booking_type, total_weight_kg, target_completion_time, status, payment_status)
        VALUES ($1, $2, $3, $4, 'Received', 'Unpaid') RETURNING *`,
-      [customer_name, booking_type, safeWeight, target_completion_time || 'Same Day, 4:00 PM - 6:00 PM']
+      [customer_name, booking_type, safeWeight, target_completion_time || 'Same Day, 6:00 PM - 8:00 PM']
     );
 
     const orderId = newOrder.rows[0].order_id;
@@ -218,15 +247,60 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-app.patch('/api/orders/:id/status', async (req, res) => {
+// Dedicated Weigh-In Route for Admin Hub
+app.patch('/api/orders/:id/weigh', async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body;
+  const { total_weight_kg, container_description, containers } = req.body;
   try {
     const updated = await pool.query(
-      'UPDATE orders SET status = $1 WHERE order_id = $2 RETURNING *',
-      [status, id]
+      "UPDATE orders SET total_weight_kg = $1, status = 'Received at Shop' WHERE order_id = $2 RETURNING *",
+      [total_weight_kg, id]
     );
+
+    if (containers && Array.isArray(containers)) {
+      await pool.query('DELETE FROM containers WHERE order_id = $1', [id]);
+      for (const b of containers) {
+        await pool.query(
+          'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, $2, $3, $4)',
+          [id, b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
+        );
+      }
+    } else if (container_description) {
+      await pool.query(
+        "UPDATE containers SET color = $1, assigned_weight_kg = $2 WHERE order_id = $3 AND basket_number = 1",
+        [container_description, total_weight_kg, id]
+      );
+    }
+    res.json(updated.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/orders/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status, total_weight_kg, containers } = req.body;
+  try {
+    let query = 'UPDATE orders SET status = $1';
+    let params = [status, id];
+
+    if (total_weight_kg !== undefined) {
+      query = 'UPDATE orders SET status = $1, total_weight_kg = $2';
+      params = [status, total_weight_kg, id];
+    }
+
+    const updated = await pool.query(`${query} WHERE order_id = $3 RETURNING *`, params);
     const order = updated.rows[0];
+
+    if (containers && Array.isArray(containers)) {
+      await pool.query('DELETE FROM containers WHERE order_id = $1', [id]);
+      for (const b of containers) {
+        await pool.query(
+          'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, $2, $3, $4)',
+          [id, b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
+        );
+      }
+    }
 
     if (order) {
       try {
@@ -280,6 +354,30 @@ app.post('/api/reviews', async (req, res) => {
       [order_id, customer_name, rating, feedback || '']
     );
     res.status(201).json({ message: 'Review submitted', review: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Announcements CRUD Endpoints
+app.post('/api/announcements', async (req, res) => {
+  const { title, message } = req.body;
+  try {
+    const result = await pool.query(
+      'INSERT INTO announcements (title, message, is_active) VALUES ($1, $2, TRUE) RETURNING *',
+      [title, message]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/announcements/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM announcements WHERE announcement_id = $1', [id]);
+    res.json({ message: 'Announcement deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
