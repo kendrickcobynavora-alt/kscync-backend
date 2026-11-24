@@ -1,4 +1,4 @@
- const express = require('express');
+const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -11,7 +11,6 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Batch Splitting Logic: 0 = pending weighing; < 12 kg = 1 batch; 12–24 kg = 2 washing batches
 function validateAndSplitContainers(totalWeight, c1, c2) {
   const weight = totalWeight === null || totalWeight === undefined || totalWeight === '' ? 0 : parseFloat(totalWeight);
 
@@ -119,7 +118,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Customer Management CRUD Endpoints for Admin
 app.put('/api/users/:id', async (req, res) => {
   const { id } = req.params;
   const { full_name, phone_number, email } = req.body;
@@ -271,7 +269,6 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-// Robust Weigh-In Route fixing Weight Now persistence
 app.patch('/api/orders/:id/weigh', async (req, res) => {
   const { id } = req.params;
   const { total_weight_kg, container_description, containers } = req.body;
