@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -56,7 +56,7 @@ app.post('/api/register', async (req, res) => {
   try {
     const newUser = await pool.query(
       "INSERT INTO users (full_name, phone_number, email, password_hash, role) VALUES ($1, $2, $3, $4, 'customer') RETURNING *",
-      [full_name, phone_number, email, password]
+      [full_name, phone_number, email, password || 'kscync123']
     );
     res.status(201).json({
       message: 'Registration successful',
@@ -73,7 +73,6 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Alias login route for Admin Hub auth check
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -120,6 +119,32 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// Customer Management CRUD Endpoints for Admin
+app.put('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+  const { full_name, phone_number, email } = req.body;
+  try {
+    const updated = await pool.query(
+      'UPDATE users SET full_name = $1, phone_number = $2, email = $3 WHERE user_id = $4 RETURNING *',
+      [full_name, phone_number, email, id]
+    );
+    if (updated.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json({ message: 'Customer updated successfully', user: updated.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/users/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM users WHERE user_id = $1', [id]);
+    res.json({ message: 'Customer deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.patch('/api/users/update', async (req, res) => {
   const { old_name, full_name, phone_number } = req.body;
   try {
@@ -159,7 +184,6 @@ app.patch('/api/users/push-token', async (req, res) => {
   }
 });
 
-// Enhanced Dashboard Route returning Orders, Reviews, Users, Announcements, and Capacities
 app.get('/api/dashboard', async (req, res) => {
   try {
     const ordersRes = await pool.query(`
@@ -247,7 +271,7 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-// Dedicated Weigh-In Route for Admin Hub
+// Robust Weigh-In Route fixing Weight Now persistence
 app.patch('/api/orders/:id/weigh', async (req, res) => {
   const { id } = req.params;
   const { total_weight_kg, container_description, containers } = req.body;
@@ -257,7 +281,7 @@ app.patch('/api/orders/:id/weigh', async (req, res) => {
       [total_weight_kg, id]
     );
 
-    if (containers && Array.isArray(containers)) {
+    if (containers && Array.isArray(containers) && containers.length > 0) {
       await pool.query('DELETE FROM containers WHERE order_id = $1', [id]);
       for (const b of containers) {
         await pool.query(
@@ -265,11 +289,19 @@ app.patch('/api/orders/:id/weigh', async (req, res) => {
           [id, b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
         );
       }
-    } else if (container_description) {
-      await pool.query(
-        "UPDATE containers SET color = $1, assigned_weight_kg = $2 WHERE order_id = $3 AND basket_number = 1",
-        [container_description, total_weight_kg, id]
-      );
+    } else {
+      const checkContainer = await pool.query('SELECT * FROM containers WHERE order_id = $1 AND basket_number = 1', [id]);
+      if (checkContainer.rows.length > 0) {
+        await pool.query(
+          'UPDATE containers SET color = $1, assigned_weight_kg = $2 WHERE order_id = $3 AND basket_number = 1',
+          [container_description || 'Standard Bag', total_weight_kg, id]
+        );
+      } else {
+        await pool.query(
+          'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, 1, $2, $3)',
+          [id, total_weight_kg, container_description || 'Standard Bag']
+        );
+      }
     }
     res.json(updated.rows[0]);
   } catch (err) {
@@ -284,7 +316,7 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     let query = 'UPDATE orders SET status = $1';
     let params = [status, id];
 
-    if (total_weight_kg !== undefined) {
+    if (total_weight_kg !== undefined && total_weight_kg !== null) {
       query = 'UPDATE orders SET status = $1, total_weight_kg = $2';
       params = [status, total_weight_kg, id];
     }
@@ -292,7 +324,7 @@ app.patch('/api/orders/:id/status', async (req, res) => {
     const updated = await pool.query(`${query} WHERE order_id = $3 RETURNING *`, params);
     const order = updated.rows[0];
 
-    if (containers && Array.isArray(containers)) {
+    if (containers && Array.isArray(containers) && containers.length > 0) {
       await pool.query('DELETE FROM containers WHERE order_id = $1', [id]);
       for (const b of containers) {
         await pool.query(
@@ -359,7 +391,6 @@ app.post('/api/reviews', async (req, res) => {
   }
 });
 
-// Announcements CRUD Endpoints
 app.post('/api/announcements', async (req, res) => {
   const { title, message } = req.body;
   try {
