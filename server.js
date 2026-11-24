@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -124,7 +124,7 @@ app.put('/api/users/:id', async (req, res) => {
   try {
     const updated = await pool.query(
       'UPDATE users SET full_name = $1, phone_number = $2, email = $3 WHERE user_id = $4 RETURNING *',
-      [full_name, phone_number, email, id]
+      [full_name, phone_number, email, parseInt(id, 10)]
     );
     if (updated.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     res.json({ message: 'Customer updated successfully', user: updated.rows[0] });
@@ -136,7 +136,7 @@ app.put('/api/users/:id', async (req, res) => {
 app.delete('/api/users/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    await pool.query('DELETE FROM users WHERE user_id = $1', [id]);
+    await pool.query('DELETE FROM users WHERE user_id = $1', [parseInt(id, 10)]);
     res.json({ message: 'Customer deleted successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -275,33 +275,38 @@ app.patch('/api/orders/:id/weigh', async (req, res) => {
   try {
     const updated = await pool.query(
       "UPDATE orders SET total_weight_kg = $1, status = 'Received at Shop' WHERE order_id = $2 RETURNING *",
-      [total_weight_kg, id]
+      [parseFloat(total_weight_kg), parseInt(id, 10)]
     );
 
+    if (updated.rows.length === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
     if (containers && Array.isArray(containers) && containers.length > 0) {
-      await pool.query('DELETE FROM containers WHERE order_id = $1', [id]);
+      await pool.query('DELETE FROM containers WHERE order_id = $1', [parseInt(id, 10)]);
       for (const b of containers) {
         await pool.query(
           'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, $2, $3, $4)',
-          [id, b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
+          [parseInt(id, 10), b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
         );
       }
     } else {
-      const checkContainer = await pool.query('SELECT * FROM containers WHERE order_id = $1 AND basket_number = 1', [id]);
+      const checkContainer = await pool.query('SELECT * FROM containers WHERE order_id = $1 AND basket_number = 1', [parseInt(id, 10)]);
       if (checkContainer.rows.length > 0) {
         await pool.query(
           'UPDATE containers SET color = $1, assigned_weight_kg = $2 WHERE order_id = $3 AND basket_number = 1',
-          [container_description || 'Standard Bag', total_weight_kg, id]
+          [container_description || 'Standard Bag', parseFloat(total_weight_kg), parseInt(id, 10)]
         );
       } else {
         await pool.query(
           'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, 1, $2, $3)',
-          [id, total_weight_kg, container_description || 'Standard Bag']
+          [parseInt(id, 10), parseFloat(total_weight_kg), container_description || 'Standard Bag']
         );
       }
     }
     res.json(updated.rows[0]);
   } catch (err) {
+    console.error('Weigh-in error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -310,53 +315,59 @@ app.patch('/api/orders/:id/status', async (req, res) => {
   const { id } = req.params;
   const { status, total_weight_kg, containers } = req.body;
   try {
-    let query = 'UPDATE orders SET status = $1';
-    let params = [status, id];
-
-    if (total_weight_kg !== undefined && total_weight_kg !== null) {
-      query = 'UPDATE orders SET status = $1, total_weight_kg = $2';
-      params = [status, total_weight_kg, id];
+    let updated;
+    if (total_weight_kg !== undefined && total_weight_kg !== null && total_weight_kg !== '') {
+      updated = await pool.query(
+        'UPDATE orders SET status = $1, total_weight_kg = $2 WHERE order_id = $3 RETURNING *',
+        [status, parseFloat(total_weight_kg), parseInt(id, 10)]
+      );
+    } else {
+      updated = await pool.query(
+        'UPDATE orders SET status = $1 WHERE order_id = $2 RETURNING *',
+        [status, parseInt(id, 10)]
+      );
     }
 
-    const updated = await pool.query(`${query} WHERE order_id = $3 RETURNING *`, params);
     const order = updated.rows[0];
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
 
     if (containers && Array.isArray(containers) && containers.length > 0) {
-      await pool.query('DELETE FROM containers WHERE order_id = $1', [id]);
+      await pool.query('DELETE FROM containers WHERE order_id = $1', [parseInt(id, 10)]);
       for (const b of containers) {
         await pool.query(
           'INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color) VALUES ($1, $2, $3, $4)',
-          [id, b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
+          [parseInt(id, 10), b.basket_number || 1, b.assigned_weight_kg || total_weight_kg || 0, b.color || 'Standard Bag']
         );
       }
     }
 
-    if (order) {
-      try {
-        const userRes = await pool.query(
-          'SELECT expo_push_token FROM users WHERE full_name = $1',
-          [order.customer_name]
-        );
-        const pushToken = userRes.rows[0]?.expo_push_token;
-        if (pushToken) {
-          await fetch('https://exp.host/--/api/v2/push/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              to: pushToken,
-              sound: 'default',
-              title: 'KSCync Laundry Update',
-              body: `Hi ${order.customer_name}! Your laundry status is now: ${status.toUpperCase()}.`
-            })
-          });
-        }
-      } catch (pushErr) {
-        console.log('Push notification skipped:', pushErr.message);
+    try {
+      const userRes = await pool.query(
+        'SELECT expo_push_token FROM users WHERE full_name = $1',
+        [order.customer_name]
+      );
+      const pushToken = userRes.rows[0]?.expo_push_token;
+      if (pushToken) {
+        await fetch('https://exp.host/--/api/v2/push/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            to: pushToken,
+            sound: 'default',
+            title: 'KSCync Laundry Update',
+            body: `Hi ${order.customer_name}! Your laundry status is now: ${status.toUpperCase()}.`
+          })
+        });
       }
+    } catch (pushErr) {
+      console.log('Push notification skipped:', pushErr.message);
     }
 
     res.json(order);
   } catch (err) {
+    console.error('Status update error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -367,7 +378,7 @@ app.patch('/api/orders/:id/payment', async (req, res) => {
   try {
     const updated = await pool.query(
       'UPDATE orders SET payment_status = $1 WHERE order_id = $2 RETURNING *',
-      [payment_status || 'Paid', id]
+      [payment_status || 'Paid', parseInt(id, 10)]
     );
     res.json(updated.rows[0]);
   } catch (err) {
@@ -404,7 +415,7 @@ app.post('/api/announcements', async (req, res) => {
 app.delete('/api/announcements/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    await pool.query('DELETE FROM announcements WHERE announcement_id = $1', [id]);
+    await pool.query('DELETE FROM announcements WHERE announcement_id = $1', [parseInt(id, 10)]);
     res.json({ message: 'Announcement deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
