@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -247,11 +247,12 @@ app.post('/api/orders', async (req, res) => {
   try {
     const safeWeight = total_weight_kg === null || total_weight_kg === undefined || total_weight_kg === '' ? 0 : parseFloat(total_weight_kg);
     const splitBaskets = validateAndSplitContainers(safeWeight, container1, container2);
+    const resolvedBookingType = booking_type === 'walk-in' ? 'Walk-in' : 'Scheduled';
 
     const newOrder = await pool.query(
       `INSERT INTO orders (customer_name, booking_type, total_weight_kg, target_completion_time, status, payment_status)
-       VALUES ($1, $2, $3, $4, 'Received', 'Unpaid') RETURNING *`,
-      [customer_name, booking_type, safeWeight, target_completion_time || 'Same Day, 6:00 PM - 8:00 PM']
+       VALUES ($1, $2, $3, $4, 'Received at Shop', 'Unpaid') RETURNING *`,
+      [customer_name, resolvedBookingType, safeWeight, target_completion_time || 'Same Day, 6:00 PM - 8:00 PM']
     );
 
     const orderId = newOrder.rows[0].order_id;
