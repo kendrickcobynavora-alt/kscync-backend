@@ -247,7 +247,10 @@ app.post('/api/orders', async (req, res) => {
   try {
     const safeWeight = total_weight_kg === null || total_weight_kg === undefined || total_weight_kg === '' ? 0 : parseFloat(total_weight_kg);
     const splitBaskets = validateAndSplitContainers(safeWeight, container1, container2);
-    const resolvedBookingType = booking_type === 'walk-in' ? 'Walk-in' : 'Scheduled';
+    
+    // Normalize booking type to match constraint values safely
+    const rawType = (booking_type || 'scheduled').toLowerCase();
+    const resolvedBookingType = rawType.includes('walk') ? 'walk-in' : 'scheduled';
 
     const newOrder = await pool.query(
       `INSERT INTO orders (customer_name, booking_type, total_weight_kg, target_completion_time, status, payment_status)
