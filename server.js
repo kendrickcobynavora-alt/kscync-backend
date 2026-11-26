@@ -1,4 +1,4 @@
- const express = require('express');
+const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -53,9 +53,13 @@ function validateAndSplitContainers(totalWeight, c1, c2) {
 app.post('/api/register', async (req, res) => {
   const { full_name, phone_number, email, password } = req.body;
   try {
+    const existing = await pool.query('SELECT * FROM users WHERE email = $1 OR full_name = $2', [email, full_name]);
+    if (existing.rows.length > 0) {
+      return res.status(201).json({ message: 'User already exists', user: existing.rows[0] });
+    }
     const newUser = await pool.query(
       "INSERT INTO users (full_name, phone_number, email, password_hash, role) VALUES ($1, $2, $3, $4, 'customer') RETURNING *",
-      [full_name, phone_number, email, password || 'kscync123']
+      [full_name, phone_number || '09000000000', email, password || 'kscync123']
     );
     res.status(201).json({
       message: 'Registration successful',
@@ -75,7 +79,7 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
-    const userRes = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const userRes = await pool.query('SELECT * FROM users WHERE email = $1 OR full_name = $1', [email]);
     if (userRes.rows.length === 0 || userRes.rows[0].password_hash !== password) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
@@ -98,7 +102,7 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
-    const userRes = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const userRes = await pool.query('SELECT * FROM users WHERE email = $1 OR full_name = $1', [email]);
     if (userRes.rows.length === 0 || userRes.rows[0].password_hash !== password) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
@@ -201,7 +205,7 @@ app.get('/api/dashboard', async (req, res) => {
       WHERE o.status NOT IN ('Completed', 'Picked Up')
     `);
 
-    const reviewsRes = await pool.query('SELECT * FROM reviews ORDER BY created_at DESC LIMIT 20');
+    const reviewsRes = await pool.query('SELECT * FROM reviews ORDER BY created_at DESC LIMIT 50');
     const usersRes = await pool.query('SELECT user_id, full_name, phone_number, role, email, expo_push_token FROM users');
     const capRes = await pool.query('SELECT * FROM shop_capacity WHERE id = 1');
     const utilRes = await pool.query('SELECT * FROM utility_logs ORDER BY log_id DESC LIMIT 1');
@@ -243,19 +247,29 @@ app.patch('/api/capacity', async (req, res) => {
 });
 
 app.post('/api/orders', async (req, res) => {
-  const { customer_name, booking_type, total_weight_kg, target_completion_time, container1, container2 } = req.body;
+  const { customer_name, phone_number, booking_type, total_weight_kg, target_completion_time, payment_status, container1, container2 } = req.body;
   try {
     const safeWeight = total_weight_kg === null || total_weight_kg === undefined || total_weight_kg === '' ? 0 : parseFloat(total_weight_kg);
     const splitBaskets = validateAndSplitContainers(safeWeight, container1, container2);
     
-    // Normalize booking type to match constraint values safely
     const rawType = (booking_type || 'scheduled').toLowerCase();
     const resolvedBookingType = rawType.includes('walk') ? 'walk-in' : 'scheduled';
+    const initialStatus = resolvedBookingType === 'walk-in' ? 'Received at Shop' : 'Scheduled';
+    const resolvedPayment = payment_status || 'Unpaid';
+
+    const existingUser = await pool.query('SELECT * FROM users WHERE full_name ILIKE $1', [customer_name.trim()]);
+    if (existingUser.rows.length === 0) {
+      const generatedEmail = `${customer_name.trim().toLowerCase().replace(/[^a-z0-9]/g, '')}${Date.now().toString().slice(-3)}@kscync.local`;
+      await pool.query(
+        "INSERT INTO users (full_name, phone_number, email, password_hash, role) VALUES ($1, $2, $3, $4, 'customer')",
+        [customer_name.trim(), phone_number || '09000000000', generatedEmail, 'kscync123']
+      );
+    }
 
     const newOrder = await pool.query(
       `INSERT INTO orders (customer_name, booking_type, total_weight_kg, target_completion_time, status, payment_status)
-       VALUES ($1, $2, $3, $4, 'Received at Shop', 'Unpaid') RETURNING *`,
-      [customer_name, resolvedBookingType, safeWeight, target_completion_time || 'Same Day, 6:00 PM - 8:00 PM']
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [customer_name.trim(), resolvedBookingType, safeWeight, target_completion_time || 'Same Day, 6:00 PM - 8:00 PM', initialStatus, resolvedPayment]
     );
 
     const orderId = newOrder.rows[0].order_id;
@@ -302,24 +316,9 @@ app.patch('/api/orders/:id/weigh', async (req, res) => {
           ]
         );
       }
-    } else {
-      const checkContainer = await pool.query('SELECT * FROM containers WHERE order_id = $1 AND basket_number = 1', [parseInt(id, 10)]);
-      if (checkContainer.rows.length > 0) {
-        await pool.query(
-          'UPDATE containers SET color = $1, assigned_weight_kg = $2 WHERE order_id = $3 AND basket_number = 1',
-          [container_description || 'Standard Bag', parseFloat(total_weight_kg), parseInt(id, 10)]
-        );
-      } else {
-        await pool.query(
-          `INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color, material, brand) 
-           VALUES ($1, 1, $2, $3, $4, $5)`,
-          [parseInt(id, 10), parseFloat(total_weight_kg), container_description || 'Standard Bag', 'Tote Bag', 'Unbranded']
-        );
-      }
     }
     res.json(updated.rows[0]);
   } catch (err) {
-    console.error('Weigh-in error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -356,31 +355,8 @@ app.patch('/api/orders/:id/status', async (req, res) => {
       }
     }
 
-    try {
-      const userRes = await pool.query(
-        'SELECT expo_push_token FROM users WHERE full_name = $1',
-        [order.customer_name]
-      );
-      const pushToken = userRes.rows[0]?.expo_push_token;
-      if (pushToken) {
-        await fetch('https://exp.host/--/api/v2/push/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            to: pushToken,
-            sound: 'default',
-            title: 'KSCync Laundry Update',
-            body: `Hi ${order.customer_name}! Your laundry status is now: ${status.toUpperCase()}.`
-          })
-        });
-      }
-    } catch (pushErr) {
-      console.log('Push notification skipped:', pushErr.message);
-    }
-
     res.json(order);
   } catch (err) {
-    console.error('Status update error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -402,6 +378,10 @@ app.patch('/api/orders/:id/payment', async (req, res) => {
 app.post('/api/reviews', async (req, res) => {
   const { order_id, customer_name, rating, feedback } = req.body;
   try {
+    const existing = await pool.query('SELECT * FROM reviews WHERE order_id = $1', [order_id]);
+    if (existing.rows.length > 0) {
+      return res.status(200).json({ message: 'Review already submitted', review: existing.rows[0] });
+    }
     const result = await pool.query(
       'INSERT INTO reviews (order_id, customer_name, rating, feedback) VALUES ($1, $2, $3, $4) RETURNING *',
       [order_id, customer_name, rating, feedback || '']
