@@ -1,4 +1,4 @@
-const express = require('express');
+ const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
 
@@ -18,12 +18,14 @@ function validateAndSplitContainers(totalWeight, c1, c2) {
     throw new Error('Weight must be a valid positive number.');
   }
 
+  const baseColor = c1?.color || 'Standard Bag';
+
   if (weight === 0 || weight < 12.0) {
     return [
       {
         basket_number: 1,
         weight: weight,
-        color: c1?.color || 'Green',
+        color: baseColor,
         material: c1?.material || 'Tote Bag',
         brand: c1?.brand || 'Unbranded'
       }
@@ -34,14 +36,14 @@ function validateAndSplitContainers(totalWeight, c1, c2) {
       {
         basket_number: 1,
         weight: half,
-        color: c1?.color || 'Green',
+        color: baseColor,
         material: c1?.material || 'Tote Bag',
         brand: c1?.brand || 'Unbranded'
       },
       {
         basket_number: 2,
         weight: Number((weight - half).toFixed(2)),
-        color: c2?.color || c1?.color || 'Blue',
+        color: `${baseColor} (Batch 2)`,
         material: c2?.material || 'Plastic Hamper',
         brand: c2?.brand || 'Generic'
       }
@@ -247,10 +249,22 @@ app.patch('/api/capacity', async (req, res) => {
 });
 
 app.post('/api/orders', async (req, res) => {
-  const { customer_name, phone_number, booking_type, total_weight_kg, target_completion_time, payment_status, container1, container2 } = req.body;
+  const { customer_name, phone_number, booking_type, total_weight_kg, target_completion_time, payment_status, containers, container1, container2 } = req.body;
   try {
     const safeWeight = total_weight_kg === null || total_weight_kg === undefined || total_weight_kg === '' ? 0 : parseFloat(total_weight_kg);
-    const splitBaskets = validateAndSplitContainers(safeWeight, container1, container2);
+    
+    let splitBaskets = [];
+    if (containers && Array.isArray(containers) && containers.length > 0) {
+      splitBaskets = containers.map(c => ({
+        basket_number: c.basket_number,
+        weight: c.assigned_weight_kg !== undefined ? c.assigned_weight_kg : c.weight,
+        color: c.color,
+        material: c.material || 'Tote Bag',
+        brand: c.brand || 'Unbranded'
+      }));
+    } else {
+      splitBaskets = validateAndSplitContainers(safeWeight, container1, container2);
+    }
     
     const rawType = (booking_type || 'scheduled').toLowerCase();
     const resolvedBookingType = rawType.includes('walk') ? 'walk-in' : 'scheduled';
@@ -277,7 +291,7 @@ app.post('/api/orders', async (req, res) => {
       await pool.query(
         `INSERT INTO containers (order_id, basket_number, assigned_weight_kg, color, material, brand)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [orderId, basket.basket_number, basket.weight, basket.color, basket.material, basket.brand]
+        [orderId, basket.basket_number, basket.weight !== undefined ? basket.weight : basket.assigned_weight_kg, basket.color, basket.material || 'Tote Bag', basket.brand || 'Unbranded']
       );
     }
 
